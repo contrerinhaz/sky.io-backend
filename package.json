@@ -1,0 +1,27 @@
+{
+  "name": "skycare-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "migrate": "node src/migrate.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "bcryptjs": "^2.4.3",
+    "cookie-parse": "^0.4.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "luxon": "^3.7.1",
+    "mysql2": "^3.9.3",
+    "openai": "^4.58.1",
+    "tz-lookup": "^6.1.25",
+    "zod": "^3.23.8"
+  }
+}
