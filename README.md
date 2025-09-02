@@ -98,7 +98,6 @@ npm install
 
 ## 2. Install dependencies
 
-```bash
 # Install dependencies
 npm install
 
