@@ -1,13 +1,22 @@
-// Simple comments added for clarity. No logic changed.
 // src/routes/companies.js
 import { Router } from 'express'
 import { z } from 'zod'
+import { DateTime } from 'luxon'
 import { query } from '../lib/db.js'
-import { getRealtime, getForecast, normalizeRealtimePayload } from '../lib/weather.js'
+import {
+  getRealtime,
+  getForecast,
+  normalizeRealtimePayload,
+  scheduleToUTCWindow,
+  summarizeForecastWindow,
+  resolveTimezone
+} from '../lib/weather.js'
 import { quickRules } from '../lib/recommendations.js'
-import { extractScheduleFromMessage, generateCompanyRecommendations } from '../lib/openai.js'
+import {
+  extractScheduleFromMessage,
+  generateCompanyRecommendations
+} from '../lib/openai.js'
 
-// Export for other files
 export const router = Router()
 
 // ----- helpers -----
@@ -17,14 +26,35 @@ function getUserId(req) {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
-// Function loadOwnedCompany
 async function loadOwnedCompany(id, userId) {
-// Database operation
   const [row] = await query(
     'SELECT * FROM companies WHERE id = :id AND user_id = :uid',
     { id, uid: userId }
   )
   return row || null
+}
+
+// Fecha relativa en español (hoy/mañana/pasado/este|próximo <día>)
+function resolveRelativeDateES(msg, tz) {
+  const s = String(msg || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+  const now = DateTime.now().setZone(tz)
+
+  // Orden: "pasado mañana" antes que "mañana"
+  if (/\bpasado\s+manana\b/.test(s)) return now.plus({ days: 2 }).toISODate()
+  if (/\bmanana\b/.test(s)) return now.plus({ days: 1 }).toISODate()
+  if (/\bhoy\b/.test(s)) return now.toISODate()
+
+  const DOW = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado']
+  const m = s.match(/\b(este|proximo|prox|pr[oó]x|el)?\s*(domingo|lunes|martes|miercoles|jueves|viernes|sabado)\b/)
+  if (m) {
+    const tgt = DOW.indexOf(m[2])                 // 0..6 (domingo..sabado)
+    const cur0 = now.weekday % 7                  // 1..7 → 1..6,0 (domingo)
+    const wantsNext = /\b(?:proximo|prox|pr[oó]x)\b/.test(m[1] || '')
+    let delta = (tgt - cur0 + 7) % 7
+    if (wantsNext && delta === 0) delta = 7       // "próximo <día>" si es hoy → +7
+    return now.plus({ days: delta }).toISODate()
+  }
+  return null
 }
 
 // ----- validation -----
@@ -41,8 +71,6 @@ router.get('/', async (req, res) => {
   try {
     const uid = getUserId(req)
     if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
-
-// Database operation
     const rows = await query(
       'SELECT * FROM companies WHERE user_id = :uid ORDER BY id DESC',
       { uid }
@@ -54,7 +82,6 @@ router.get('/', async (req, res) => {
   }
 })
 
-// Handle POST /
 router.post('/', async (req, res) => {
   try {
     const uid = getUserId(req)
@@ -66,13 +93,11 @@ router.post('/', async (req, res) => {
     }
     const { name, activity, address = null, lat, lon } = parsed.data
 
-// Database operation
     await query(
       `INSERT INTO companies (user_id, name, activity, address, lat, lon)
        VALUES (:uid, :name, :activity, :address, :lat, :lon)`,
       { uid, name, activity, address, lat, lon }
     )
-// Database operation
     const [company] = await query('SELECT * FROM companies WHERE id = LAST_INSERT_ID()')
     res.status(201).json(company)
   } catch (err) {
@@ -81,12 +106,10 @@ router.post('/', async (req, res) => {
   }
 })
 
-// Handle GET /:id
 router.get('/:id', async (req, res) => {
   try {
     const uid = getUserId(req)
     if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
-
     const company = await loadOwnedCompany(req.params.id, uid)
     if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
     res.json(company)
@@ -96,24 +119,18 @@ router.get('/:id', async (req, res) => {
   }
 })
 
-
-// Handle DELETE /:id
 router.delete('/:id', async (req, res) => {
   try {
-    const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'BAD_ID' })
+    const uid = getUserId(req)
+    if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const company = await loadOwnedCompany(req.params.id, uid)
+    if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
 
-// Database operation
-    const r = await query('DELETE FROM companies WHERE id = :id', { id })
-    const affected = r?.affectedRows ?? r?.[0]?.affectedRows ?? 0
-    if (affected === 0) return res.status(404).json({ error: 'NOT_FOUND' })
-
-    return res.status(204).end()
+    const r = await query('DELETE FROM companies WHERE id = :id AND user_id = :uid', { id: company.id, uid })
+    if (!r.affectedRows) return res.status(404).json({ error: 'NOT_FOUND' })
+    res.status(204).end()
   } catch (err) {
-    // Conflicto por FK
-    if (err?.code === 'ER_ROW_IS_REFERENCED_2') {
-      return res.status(409).json({ error: 'FK_CONSTRAINT' })
-    }
+    if (err?.code === 'ER_ROW_IS_REFERENCED_2') return res.status(409).json({ error: 'FK_CONSTRAINT' })
     console.error(err)
     res.status(500).json({ error: 'DB_ERROR' })
   }
@@ -142,7 +159,7 @@ router.get('/:id/weather', async (req, res) => {
   }
 })
 
-// ===== IA historial (scoped) =====
+// ===== Historial (scoped) =====
 router.get('/:id/historial', async (req, res) => {
   try {
     const uid = getUserId(req)
@@ -154,7 +171,6 @@ router.get('/:id/historial', async (req, res) => {
     const limit  = Math.min(Number(req.query.limit ?? 50), 200)
     const offset = Math.max(Number(req.query.offset ?? 0), 0)
 
-// Database operation
     const rows = await query(
       `SELECT id, ts, prompt, schedule, response
          FROM historial
@@ -170,7 +186,6 @@ router.get('/:id/historial', async (req, res) => {
   }
 })
 
-// Handle DELETE /:id/historial
 router.delete('/:id/historial', async (req, res) => {
   try {
     const uid = getUserId(req)
@@ -179,7 +194,6 @@ router.delete('/:id/historial', async (req, res) => {
     const company = await loadOwnedCompany(req.params.id, uid)
     if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
 
-// Database operation
     const r = await query(
       'DELETE FROM historial WHERE user_id = :uid AND company_id = :cid',
       { uid, cid: company.id }
@@ -191,7 +205,7 @@ router.delete('/:id/historial', async (req, res) => {
   }
 })
 
-// ===== Advanced query (scoped + persist historial) =====
+// ===== Advanced query (Tomorrow.io exact window + persist historial) =====
 router.post('/:id/advanced-query', async (req, res) => {
   try {
     const uid = getUserId(req)
@@ -203,27 +217,70 @@ router.post('/:id/advanced-query', async (req, res) => {
     const message = String(req.body?.message || '').trim()
     if (!message) return res.status(400).json({ error: 'Mensaje vacío' })
 
-    // 1) Extract schedule from NL
-    const schedule = await extractScheduleFromMessage(message, company)
+    // 1) Extraer horario del mensaje
+    const extracted = await extractScheduleFromMessage(message, company)
 
-    // 2) Pull 1h forecast & slice window around start
-    const forecastRaw = await getForecast({
-      lat: company.lat, lon: company.lon, units: 'metric', timesteps: '1h'
+    // 2) Zona horaria
+    const tz = resolveTimezone(company.lat, company.lon, extracted.zonaHoraria)
+
+    // 3) Resolver fecha (relativos o explícita) y evitar pasado
+    const today = DateTime.now().setZone(tz).startOf('day')
+    const rel = resolveRelativeDateES(message, tz)
+    let fechaDT = rel
+      ? DateTime.fromISO(rel, { zone: tz })
+      : (extracted.fecha ? DateTime.fromISO(extracted.fecha, { zone: tz }) : null)
+    if (!fechaDT?.isValid) fechaDT = today
+    if (!rel && fechaDT < today) fechaDT = today
+
+    // 4) Schedule normalizado
+    const schedule = {
+      actividad: extracted.actividad ?? company.activity ?? null,
+      fecha: fechaDT.toISODate(),
+      horaInicio: extracted.horaInicio || '08:00',
+      horaFin:    extracted.horaFin    || '17:00',
+      zonaHoraria: extracted.zonaHoraria ?? tz
+    }
+
+    // 5) Ventana UTC exacta
+    const { tz: tzWindow, startISO, endISO } = scheduleToUTCWindow(
+      { fecha: schedule.fecha, horaInicio: schedule.horaInicio, horaFin: schedule.horaFin, zonaHoraria: schedule.zonaHoraria },
+      company.lat, company.lon
+    )
+
+    const units = 'metric'
+    let raw = await getForecast({
+      lat: company.lat, lon: company.lon, units, timesteps: '1h',
+      startTime: startISO, endTime: endISO
     })
-    const series = forecastRaw?.timelines?.hourly || []
-    const targetDateTime = new Date(`${schedule.fecha || ''}T${(schedule.horaInicio || '00:00')}:00`)
-    const windowMs = 2 * 60 * 60 * 1000
-    const around = Number.isFinite(targetDateTime.getTime())
-      ? series.filter(p => Math.abs(new Date(p.time).getTime() - targetDateTime.getTime()) <= windowMs).slice(0, 6)
-      : series.slice(0, 6)
-    const weatherFacts = around.map(p => ({ time: p.time, ...p.values }))
+    let weatherFacts = summarizeForecastWindow(raw, startISO, endISO)
 
-    // 3) Ask LLM for recs
+    // 6) Fallbacks (6h y realtime)
+    if (!weatherFacts?.hours) {
+      const now = new Date().toISOString()
+      const end6 = new Date(Date.now() + 6 * 3600 * 1000).toISOString()
+      raw = await getForecast({ lat: company.lat, lon: company.lon, units, timesteps: '1h', startTime: now, endTime: end6 })
+      weatherFacts = summarizeForecastWindow(raw, now, end6)
+
+      if (!weatherFacts?.hours) {
+        const rt = await getRealtime({ lat: company.lat, lon: company.lon, units })
+        const v = rt?.data?.values || {}
+        weatherFacts = {
+          tz: tzWindow,
+          hours: 1,
+          tempMin: v.temperature ?? null, tempMax: v.temperature ?? null,
+          windMax_ms: v.windSpeed ?? 0, gustMax_ms: v.windGust ?? 0,
+          uvMax: v.uvIndex ?? 0, visMin_km: v.visibility ?? null,
+          precipProbMax: v.precipitationProbability ?? 0,
+          precipMmTotal: v.rainIntensity ?? v.precipitationIntensity ?? 0,
+          codes: v.weatherCode != null ? [v.weatherCode] : []
+        }
+      }
+    }
+
+    // 7) Recomendaciones y persistencia
     const recommendations = await generateCompanyRecommendations({ company, schedule, weatherFacts })
 
-    // 4) Persist historial (FKs ON DELETE CASCADE)
     try {
-// Database operation
       await query(
         `INSERT INTO historial (user_id, company_id, prompt, schedule, response)
          VALUES (:uid, :cid, :prompt, :schedule, :response)`,
@@ -236,7 +293,7 @@ router.post('/:id/advanced-query', async (req, res) => {
         }
       )
     } catch (e) {
-      console.warn('historial_INSERT_WARN:', e.message)
+      console.warn('historial_INSERT_WARN:', e?.message || e)
     }
 
     res.json({ company, schedule, weatherFacts, recommendations })
@@ -245,3 +302,71 @@ router.post('/:id/advanced-query', async (req, res) => {
     res.status(500).json({ error: 'ADV_QUERY_ERROR' })
   }
 })
+
+/* ===== Alias /history para compatibilidad con el front ===== */
+router.post('/:id/history', async (req, res) => {
+  try {
+    const uid = getUserId(req)
+    if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const company = await loadOwnedCompany(req.params.id, uid)
+    if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
+
+    const { prompt, schedule, response } = req.body || {}
+    if (!prompt || typeof prompt !== 'string') return res.status(400).json({ error: 'prompt requerido' })
+
+    const r = await query(
+      `INSERT INTO historial (user_id, company_id, prompt, schedule, response)
+       VALUES (:uid, :cid, :prompt, :schedule, :response)`,
+      { uid, cid: company.id, prompt, schedule: JSON.stringify(schedule || null), response: response ?? null }
+    )
+    res.json({ ok: true, id: r.insertId })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'ERROR_SAVING_HISTORY' })
+  }
+})
+
+router.get('/:id/history', async (req, res) => {
+  try {
+    const uid = getUserId(req)
+    if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const company = await loadOwnedCompany(req.params.id, uid)
+    if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
+
+    const limit  = Math.min(Number(req.query.limit ?? 50), 200)
+    const offset = Math.max(Number(req.query.offset ?? 0), 0)
+    const rows = await query(
+      `SELECT id, ts, prompt, schedule, response
+         FROM historial
+        WHERE user_id = :uid AND company_id = :cid
+        ORDER BY ts DESC
+        LIMIT ${limit} OFFSET ${offset}`,
+      { uid, cid: company.id }
+    )
+    const items = rows.map(r => ({
+      ...r,
+      schedule: (() => { try { return r.schedule ? JSON.parse(r.schedule) : null } catch { return r.schedule } })()
+    }))
+    res.json({ items })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'ERROR_LISTING_HISTORY' })
+  }
+})
+
+router.delete('/:id/history', async (req, res) => {
+  try {
+    const uid = getUserId(req)
+    if (!uid) return res.status(401).json({ error: 'UNAUTHORIZED' })
+    const company = await loadOwnedCompany(req.params.id, uid)
+    if (!company) return res.status(404).json({ error: 'NOT_FOUND' })
+
+    const r = await query('DELETE FROM historial WHERE user_id = :uid AND company_id = :cid', { uid, cid: company.id })
+    res.json({ ok: true, deleted: r.affectedRows || 0 })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'ERROR_DELETING_HISTORY' })
+  }
+})
+
+export default router

@@ -1,4 +1,3 @@
-// src/server.js
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -13,18 +12,19 @@ import { query } from './lib/db.js'
 
 const app = express()
 
-/* ===== Middlewares base ===== */
+/* ===== CORS y middlewares base ===== */
 const corsCfg = {
   origin: (process.env.CORS_ORIGIN?.split(',').map(s => s.trim()).filter(Boolean)) || ['http://localhost:5173'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-id', 'X-User-Id']
 }
 app.use(cors(corsCfg))
 app.use(express.json({ limit: '1mb' }))
 app.use(cookieParser())
 
-/* ===== Auth middleware ===== */
+/* ===== Auth middlewares ===== */
+// Requiere JWT estrictamente
 function auth(req, res, next) {
   const hdr = req.get('authorization') || ''
   const m = hdr.match(/^Bearer\s+(.+)$/i)
@@ -37,6 +37,21 @@ function auth(req, res, next) {
     res.status(401).json({ error: 'INVALID_TOKEN' })
   }
 }
+
+// Acepta JWT o x-user-id (útil para dev y front existente)
+function authOrHeader(req, res, next) {
+  const hdr = req.get('authorization') || ''
+  const m = hdr.match(/^Bearer\s+(.+)$/i)
+  const token = m?.[1] || req.cookies?.token
+  if (token) {
+    try { req.user = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret'); return next() } catch {}
+  }
+  const xu = req.get('x-user-id')
+  const n = Number(xu)
+  if (Number.isFinite(n) && n > 0) { req.user = { id: n, role: 'customer' }; return next() }
+  return res.status(401).json({ error: 'NO_TOKEN' })
+}
+
 function requireAdmin(req, res, next) {
   const role = String(req.user?.role || '').toLowerCase()
   if (role !== 'admin') return res.status(403).json({ error: 'FORBIDDEN' })
@@ -49,11 +64,11 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toIS
 /* ===== Rutas públicas ===== */
 app.use('/api/auth', authRouter)
 
-/* ===== Rutas protegidas estándar (scoped al usuario) ===== */
-app.use('/api/companies', auth, companiesRouter)
+/* ===== Rutas protegidas (scoped al usuario) ===== */
+app.use('/api/companies', authOrHeader, companiesRouter)
 
 /* =============================================================================
-   ADMIN API  (no se crean archivos nuevos; endpoints directos aquí)
+   ADMIN API
    ========================================================================== */
 
 /* ---- Users ---- */
@@ -152,7 +167,6 @@ app.delete('/api/admin/users/:id', auth, requireAdmin, async (req, res) => {
     const r = await query(`DELETE FROM users WHERE id = :id`, { id })
     const affected = r?.affectedRows ?? r?.[0]?.affectedRows ?? 0
     if (affected === 0) return res.status(404).json({ error: 'NOT_FOUND' })
-    // ON DELETE CASCADE borra sus companies e historial
     res.status(204).end()
   } catch (e) {
     console.error(e)
