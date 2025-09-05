@@ -5,10 +5,10 @@ USE skycare;
 -- =========================
 -- ROLES
 -- =========================
-CREATE TABLE roles (
+CREATE TABLE IF NOT EXISTS roles (
   id   TINYINT UNSIGNED PRIMARY KEY,
   slug VARCHAR(30) NOT NULL UNIQUE,   -- 'admin', 'customer'
-  name VARCHAR(50) NOT NULL UNIQUE    -- 'Administrador', 'Cliente'
+  name VARCHAR(50) NOT NULL UNIQUE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO roles (id, slug, name) VALUES
@@ -18,7 +18,7 @@ INSERT INTO roles (id, slug, name) VALUES
 -- =========================
 -- USERS (con rol)
 -- =========================
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id             INT AUTO_INCREMENT PRIMARY KEY,
   name           VARCHAR(100)  NOT NULL,
   email          VARCHAR(150)  NOT NULL UNIQUE,
@@ -34,9 +34,9 @@ CREATE TABLE users (
 -- =============================
 -- COMPANIES (propietario user)
 -- =============================
-CREATE TABLE companies (
+CREATE TABLE IF NOT EXISTS companies (
   id         INT AUTO_INCREMENT PRIMARY KEY,
-  user_id    INT           NOT NULL,                    -- owner
+  user_id    INT           NOT NULL,
   name       VARCHAR(200)  NOT NULL,
   activity   VARCHAR(200)  NOT NULL,
   address    VARCHAR(255)  NULL,
@@ -53,7 +53,7 @@ CREATE TABLE companies (
 -- ==========================
 -- HISTORIAL (consultas IA)
 -- ==========================
-CREATE TABLE historial (
+CREATE TABLE IF NOT EXISTS historial (
   id          BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id     INT         NOT NULL,
   company_id  INT         NOT NULL,
